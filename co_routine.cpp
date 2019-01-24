@@ -467,6 +467,7 @@ struct stCoRoutine_t *co_create_env( stCoRoutineEnv_t * env, const stCoRoutineAt
 	{
 		memcpy( &at,attr,sizeof(at) );
 	}
+	// 栈大小为128K~8M
 	if( at.stack_size <= 0 )
 	{
 		at.stack_size = 128 * 1024;
@@ -476,6 +477,7 @@ struct stCoRoutine_t *co_create_env( stCoRoutineEnv_t * env, const stCoRoutineAt
 		at.stack_size = 1024 * 1024 * 8;
 	}
 
+	// 取整为4KB
 	if( at.stack_size & 0xFFF ) 
 	{
 		at.stack_size &= ~0xFFF;
