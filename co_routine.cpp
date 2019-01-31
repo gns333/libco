@@ -48,6 +48,7 @@ using namespace std;
 stCoRoutine_t *GetCurrCo( stCoRoutineEnv_t *env );
 struct stCoEpoll_t;
 
+// coroutine运行环境
 struct stCoRoutineEnv_t
 {
 	stCoRoutine_t *pCallStack[ 128 ];
@@ -99,6 +100,7 @@ static unsigned long long getCpuKhz()
 }
 #endif
 
+// 精度为ms的当前时间点
 static unsigned long long GetTickMS()
 {
 #if defined( __LIBCO_RDTSCP__) 
@@ -148,6 +150,7 @@ static pid_t GetPid()
 	return p ? *(pid_t*)(p + 18) : getpid();
 }
 */
+// 从所属链表中移除传入的节点
 template <class T,class TLink>
 void RemoveFromLink(T *ap)
 {
@@ -188,6 +191,7 @@ void RemoveFromLink(T *ap)
 	ap->pLink = NULL;
 }
 
+// 添加节点到最后
 template <class TNode,class TLink>
 void inline AddTail(TLink*apLink,TNode *ap)
 {
@@ -209,6 +213,7 @@ void inline AddTail(TLink*apLink,TNode *ap)
 	}
 	ap->pLink = apLink;
 }
+// 弹出头部节点
 template <class TNode,class TLink>
 void inline PopHead( TLink*apLink )
 {
@@ -235,6 +240,7 @@ void inline PopHead( TLink*apLink )
 	}
 }
 
+// 合并两个链表 apLink在前 apOther在后
 template <class TNode,class TLink>
 void inline Join( TLink*apLink,TLink *apOther )
 {
@@ -355,9 +361,16 @@ struct stTimeout_t
 	stTimeoutItemLink_t *pItems;
 	int iItemSize;
 
-	unsigned long long ullStart;
+	unsigned long long ullStart; // ms
 	long long llStartIdx;
 };
+/*
+iSize 为 60*1000
+iItemSize = 60000
+pItems是长度为60000 指向链表的指针数组
+当前时间开始 往后每ms对应一个链表 最多+60s
+ullStart当前时间ms
+*/
 stTimeout_t *AllocTimeout( int iSize )
 {
 	stTimeout_t *lp = (stTimeout_t*)calloc( 1,sizeof(stTimeout_t) );	
@@ -377,11 +390,13 @@ void FreeTimeout( stTimeout_t *apTimeout )
 }
 int AddTimeout( stTimeout_t *apTimeout,stTimeoutItem_t *apItem ,unsigned long long allNow )
 {
+	// 第一次add 初始化下ullStart和llStartIdx
 	if( apTimeout->ullStart == 0 )
 	{
 		apTimeout->ullStart = allNow;
 		apTimeout->llStartIdx = 0;
 	}
+	// 当前时间 比ullStart开始时间小 异常情况
 	if( allNow < apTimeout->ullStart )
 	{
 		co_log_err("CO_ERR: AddTimeout line %d allNow %llu apTimeout->ullStart %llu",
@@ -389,6 +404,7 @@ int AddTimeout( stTimeout_t *apTimeout,stTimeoutItem_t *apItem ,unsigned long lo
 
 		return __LINE__;
 	}
+	// 待添加节点设定的过期时间 比当前时间小 异常情况
 	if( apItem->ullExpireTime < allNow )
 	{
 		co_log_err("CO_ERR: AddTimeout line %d apItem->ullExpireTime %llu allNow %llu apTimeout->ullStart %llu",
@@ -396,6 +412,9 @@ int AddTimeout( stTimeout_t *apTimeout,stTimeoutItem_t *apItem ,unsigned long lo
 
 		return __LINE__;
 	}
+	// 节点过期时间 与 开始时间 偏移多少ms
+	// 根据偏移的ms数量 选择相应的链表放入节点
+	// 如果大于等于60000ms 放到最后一个链表
 	unsigned long long diff = apItem->ullExpireTime - apTimeout->ullStart;
 
 	if( diff >= (unsigned long long)apTimeout->iItemSize )
@@ -422,6 +441,8 @@ inline void TakeAllTimeout( stTimeout_t *apTimeout,unsigned long long allNow,stT
 	{
 		return ;
 	}
+	// 从上次调度到现在 过去了cnt个ms
+	// 如果cnt > 60000 取cnt = 60000
 	int cnt = allNow - apTimeout->ullStart + 1;
 	if( cnt > apTimeout->iItemSize )
 	{
@@ -431,16 +452,20 @@ inline void TakeAllTimeout( stTimeout_t *apTimeout,unsigned long long allNow,stT
 	{
 		return;
 	}
+	// 比当前时间更早的所有节点 都清空 并且添加到apResult链表中
 	for( int i = 0;i<cnt;i++)
 	{
 		int idx = ( apTimeout->llStartIdx + i) % apTimeout->iItemSize;
 		Join<stTimeoutItem_t,stTimeoutItemLink_t>( apResult,apTimeout->pItems + idx  );
 	}
+	// 设置开始时间为当前时间
+	// 设置开始index到相应数值 index指向的链表对应的是ullStart时间点
 	apTimeout->ullStart = allNow;
 	apTimeout->llStartIdx += cnt - 1;
 
 
 }
+// 执行coroutine的逻辑函数 执行完成之后主动在协程环境中yield
 static int CoRoutineFunc( stCoRoutine_t *co,void * )
 {
 	if( co->pfn )
@@ -457,11 +482,11 @@ static int CoRoutineFunc( stCoRoutine_t *co,void * )
 }
 
 
-
+// 创建一个新的coroutine
 struct stCoRoutine_t *co_create_env( stCoRoutineEnv_t * env, const stCoRoutineAttr_t* attr,
 		pfn_co_routine_t pfn,void *arg )
 {
-
+	// 参数attr拷贝到局部变量at
 	stCoRoutineAttr_t at;
 	if( attr )
 	{
@@ -493,19 +518,24 @@ struct stCoRoutine_t *co_create_env( stCoRoutineEnv_t * env, const stCoRoutineAt
 	lp->pfn = pfn;
 	lp->arg = arg;
 
+	// 分配栈空间
 	stStackMem_t* stack_mem = NULL;
 	if( at.share_stack )
 	{
+		// 使用预分配的共享栈空间
 		stack_mem = co_get_stackmem( at.share_stack);
 		at.stack_size = at.share_stack->stack_size;
 	}
 	else
 	{
+		// 单独分配栈空间
 		stack_mem = co_alloc_stackmem(at.stack_size);
 	}
 	lp->stack_mem = stack_mem;
 
+	// ss_sp 栈顶指针
 	lp->ctx.ss_sp = stack_mem->stack_buffer;
+	// ss_size 栈大小
 	lp->ctx.ss_size = at.stack_size;
 
 	lp->cStart = 0;
@@ -520,6 +550,7 @@ struct stCoRoutine_t *co_create_env( stCoRoutineEnv_t * env, const stCoRoutineAt
 	return lp;
 }
 
+// 创建一个新的coroutine
 int co_create( stCoRoutine_t **ppco,const stCoRoutineAttr_t *attr,pfn_co_routine_t pfn,void *arg )
 {
 	if( !co_get_curr_thread_env() ) 
@@ -527,9 +558,11 @@ int co_create( stCoRoutine_t **ppco,const stCoRoutineAttr_t *attr,pfn_co_routine
 		co_init_curr_thread_env();
 	}
 	stCoRoutine_t *co = co_create_env( co_get_curr_thread_env(), attr, pfn,arg );
+	// ppco是一个指向指针变量的指针 函数返回之前 将传入的指针指向新创建的coroutine
 	*ppco = co;
 	return 0;
 }
+// 释放coroutine空间 
 void co_free( stCoRoutine_t *co )
 {
     if (!co->cIsShareStack) 
@@ -543,23 +576,29 @@ void co_release( stCoRoutine_t *co )
 {
     co_free( co );
 }
-
+// 切换coroutine
 void co_swap(stCoRoutine_t* curr, stCoRoutine_t* pending_co);
 
+// 切换到指定coroutine
 void co_resume( stCoRoutine_t *co )
 {
 	stCoRoutineEnv_t *env = co->env;
 	stCoRoutine_t *lpCurrRoutine = env->pCallStack[ env->iCallStackSize - 1 ];
 	if( !co->cStart )
 	{
+		// coroutine初始化context 逻辑函数指向CoRoutineFunc 
+		// CoRoutineFunc执行时会调用真正的逻辑函数co->pfn
 		coctx_make( &co->ctx,(coctx_pfn_t)CoRoutineFunc,co,0 );
 		co->cStart = 1;
 	}
+	// 将coroutine压入协程运行环境的保存数组
+	// 【TODO】这里否需要考虑pCallStack的数组越界问题?
 	env->pCallStack[ env->iCallStackSize++ ] = co;
 	co_swap( lpCurrRoutine, co );
 
 
 }
+// 从当前coroutine返回 切换到本线程上一次执行的coroutine
 void co_yield_env( stCoRoutineEnv_t *env )
 {
 	
@@ -576,6 +615,9 @@ void co_yield_ct()
 
 	co_yield_env( co_get_curr_thread_env() );
 }
+// 传入的参数co用来获取执行环境env
+// 如果co所属线程与co_yield执行时是相同线程 则co_yield与co_yield_ct一致
+// 如果传入其它线程的co 会有线程同步问题
 void co_yield( stCoRoutine_t *co )
 {
 	co_yield_env( co->env );
@@ -585,13 +627,18 @@ void save_stack_buffer(stCoRoutine_t* occupy_co)
 {
 	///copy out
 	stStackMem_t* stack_mem = occupy_co->stack_mem;
+	// stack_mem->stack_bp 栈底
+	// occupy_co->stack_sp 栈顶
+	// len 当前实际使用的栈空间大小
 	int len = stack_mem->stack_bp - occupy_co->stack_sp;
 
+	// 如果有上次保存过的栈空间 释放内存并清空指针
 	if (occupy_co->save_buffer)
 	{
 		free(occupy_co->save_buffer), occupy_co->save_buffer = NULL;
 	}
-
+	
+	// 分配实际使用大小的堆内存 用于保存coroutine栈空间
 	occupy_co->save_buffer = (char*)malloc(len); //malloc buf;
 	occupy_co->save_size = len;
 
@@ -600,6 +647,7 @@ void save_stack_buffer(stCoRoutine_t* occupy_co)
 
 void co_swap(stCoRoutine_t* curr, stCoRoutine_t* pending_co)
 {
+	// 当前线程的coroutine环境
  	stCoRoutineEnv_t* env = co_get_curr_thread_env();
 
 	//get curr stack sp
@@ -627,6 +675,9 @@ void co_swap(stCoRoutine_t* curr, stCoRoutine_t* pending_co)
 	}
 
 	//swap context
+	// 当前栈顶地址和其它寄存器存入curr->ctx数组
+	// 从pending_co->ctx数组弹出保存的寄存器数值
+	// 函数执行完成之后 协程curr的运行环境被保存 切换到pending_co的运行环境 寄存器 和 堆栈
 	coctx_swap(&(curr->ctx),&(pending_co->ctx) );
 
 	//stack buffer may be overwrite, so get again;
@@ -703,6 +754,8 @@ static short EpollEvent2Poll( uint32_t events )
 	return e;
 }
 
+// 线程局部变量 
+// coroutine执行环境 每个线程独有一个
 static __thread stCoRoutineEnv_t* gCoEnvPerThread = NULL;
 
 void co_init_curr_thread_env()
