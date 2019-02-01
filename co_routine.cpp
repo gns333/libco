@@ -680,6 +680,8 @@ void co_swap(stCoRoutine_t* curr, stCoRoutine_t* pending_co)
 	// 函数执行完成之后 协程curr的运行环境被保存 切换到pending_co的运行环境 寄存器 和 堆栈
 	coctx_swap(&(curr->ctx),&(pending_co->ctx) );
 
+	// curr_env保存的pending_co不受堆栈切换影响
+	// 恢复pending_co（将要切入的目标coroutine）保存在堆上的栈内存
 	//stack buffer may be overwrite, so get again;
 	stCoRoutineEnv_t* curr_env = co_get_curr_thread_env();
 	stCoRoutine_t* update_occupy_co =  curr_env->occupy_co;
@@ -829,6 +831,9 @@ void co_eventloop( stCoEpoll_t *ctx,pfn_co_eventloop_t pfn,void *arg )
 
 		for(int i=0;i<ret;i++)
 		{
+			// 处理已就绪节点 
+			// 如果有pfnPrepare函数 则执行pfnPrepare函数 pfnPrepare函数处理时也会加入active链表
+			// 如果没有pfnPrepare函数 直接加入active链表中
 			stTimeoutItem_t *item = (stTimeoutItem_t*)result->events[i].data.ptr;
 			if( item->pfnPrepare )
 			{
@@ -842,8 +847,10 @@ void co_eventloop( stCoEpoll_t *ctx,pfn_co_eventloop_t pfn,void *arg )
 
 
 		unsigned long long now = GetTickMS();
+		// 找出当前时间ctx->pTimeout中所有已过期的节点 放入timeout链表中
 		TakeAllTimeout( ctx->pTimeout,now,timeout );
 
+		// 已过期节点标记bTimeout为true
 		stTimeoutItem_t *lp = timeout->head;
 		while( lp )
 		{
@@ -852,6 +859,7 @@ void co_eventloop( stCoEpoll_t *ctx,pfn_co_eventloop_t pfn,void *arg )
 			lp = lp->pNext;
 		}
 
+		// timeout链表添加到active链表尾部 timeout自身会清空
 		Join<stTimeoutItem_t,stTimeoutItemLink_t>( active,timeout );
 
 		lp = active->head;
@@ -861,6 +869,10 @@ void co_eventloop( stCoEpoll_t *ctx,pfn_co_eventloop_t pfn,void *arg )
 			PopHead<stTimeoutItem_t,stTimeoutItemLink_t>( active );
             if (lp->bTimeout && now < lp->ullExpireTime) 
 			{
+				// 被标记为bTimeout 但是实际并没有过期的节点 重新放入ctx->pTimeout进行轮转
+				// 为什么会有这种节点?
+				// 因为放入ctx->pTimeout时（AddTimeout） 过期时间距离当前大于60s的节点 都会放入60s的槽位（最远的槽位） 
+				// 60s之后这种节点会被标记为bTimeout 但实际上并没有过期
 				int ret = AddTimeout(ctx->pTimeout, lp, now);
 				if (!ret) 
 				{
@@ -869,6 +881,7 @@ void co_eventloop( stCoEpoll_t *ctx,pfn_co_eventloop_t pfn,void *arg )
 					continue;
 				}
 			}
+			// 执行节点的pfnProcess函数 包含两种：1.就绪节点 2.过期节点
 			if( lp->pfnProcess )
 			{
 				lp->pfnProcess( lp );
@@ -876,6 +889,7 @@ void co_eventloop( stCoEpoll_t *ctx,pfn_co_eventloop_t pfn,void *arg )
 
 			lp = active->head;
 		}
+		// 每次心跳都会执行的自定义函数 用于退出循环
 		if( pfn )
 		{
 			if( -1 == pfn( arg ) )
@@ -897,7 +911,10 @@ stCoEpoll_t *AllocEpoll()
 {
 	stCoEpoll_t *ctx = (stCoEpoll_t*)calloc( 1,sizeof(stCoEpoll_t) );
 
+	// 创建1024*10数量的epool句柄空位 等待后续添加
 	ctx->iEpollFd = co_epoll_create( stCoEpoll_t::_EPOLL_SIZE );
+	// 创建总槽位为60000 以ms为单位刻度的链表数组 
+	// 后续添加新节点时 会根据任务过期时间添加到对应槽位的链表中 用于任务节点的超时管理
 	ctx->pTimeout = AllocTimeout( 60 * 1000 );
 	
 	ctx->pstActiveList = (stTimeoutItemLink_t*)calloc( 1,sizeof(stTimeoutItemLink_t) );
@@ -983,6 +1000,7 @@ int co_poll_inner( stCoEpoll_t *ctx,struct pollfd fds[], nfds_t nfds, int timeou
 			ev.data.ptr = arg.pPollItems + i;
 			ev.events = PollEvent2Epoll( fds[i].events );
 
+			// 添加到epoll监听事件中
 			int ret = co_epoll_ctl( epfd,EPOLL_CTL_ADD, fds[i].fd, &ev );
 			if (ret < 0 && errno == EPERM && nfds == 1 && pollfunc != NULL)
 			{
@@ -1003,6 +1021,7 @@ int co_poll_inner( stCoEpoll_t *ctx,struct pollfd fds[], nfds_t nfds, int timeou
 
 	unsigned long long now = GetTickMS();
 	arg.ullExpireTime = now + timeout;
+	// 添加到超时管理中
 	int ret = AddTimeout( ctx->pTimeout,&arg,now );
 	int iRaiseCnt = 0;
 	if( ret != 0 )
@@ -1015,6 +1034,7 @@ int co_poll_inner( stCoEpoll_t *ctx,struct pollfd fds[], nfds_t nfds, int timeou
 	}
     else
 	{
+		// 从当前协程切出
 		co_yield_env( co_get_curr_thread_env() );
 		iRaiseCnt = arg.iRaiseCnt;
 	}
