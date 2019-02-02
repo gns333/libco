@@ -974,6 +974,7 @@ int co_poll_inner( stCoEpoll_t *ctx,struct pollfd fds[], nfds_t nfds, int timeou
 	stPollItem_t arr[2];
 	if( nfds < sizeof(arr) / sizeof(arr[0]) && !self->cIsShareStack)
 	{
+		// 如果需要监听的fd小于2 并且不使用共享栈 直接引用栈上内存
 		arg.pPollItems = arr;
 	}	
 	else
@@ -982,6 +983,7 @@ int co_poll_inner( stCoEpoll_t *ctx,struct pollfd fds[], nfds_t nfds, int timeou
 	}
 	memset( arg.pPollItems,0,nfds * sizeof(stPollItem_t) );
 
+	// 触发时间或者超时之后 执行OnPollProcessEvent 切回调用协程
 	arg.pfnProcess = OnPollProcessEvent;
 	arg.pArg = GetCurrCo( co_get_curr_thread_env() );
 	
@@ -1083,6 +1085,7 @@ stCoEpoll_t *co_get_epoll_ct()
 	}
 	return co_get_curr_thread_env()->pEpoll;
 }
+// 协程局部变量 类似于线程局部变量
 struct stHookPThreadSpec_t
 {
 	stCoRoutine_t *co;
